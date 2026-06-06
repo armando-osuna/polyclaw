@@ -1,0 +1,18 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+
+# Environment
+.env
+
+# Logs
+trader.log
+ai_reasoning.log
+positions.csv
+
+# DS_Store
+.DS_Store
+
+# IDE
+.vscode/
+.idea/venv/
