@@ -44,9 +44,10 @@ def _session() -> requests.Session:
     return s
 
 
-def fetch_markets(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
+def fetch_markets(offset: int = 0, limit: int = 50, tag: str = "all") -> list[dict[str, Any]]:
     """
     Query Gamma API for open (active) markets sorted by volume.
+    Use tag="all" for all categories, or a specific category tag.
     """
     url = f"{config.GAMMA_API_BASE}/markets"
     params = {
@@ -54,13 +55,13 @@ def fetch_markets(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
         "limit": limit,
         "offset": offset,
         "order": "volume",
-        "tag": "all",
+        "tag": tag,
     }
     try:
         resp = _session().get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        logger.debug("Gamma API returned %d markets (offset=%d)", len(data), offset)
+        logger.debug("Gamma API returned %d markets (offset=%d, tag=%s)", len(data), offset, tag)
         return data
     except requests.RequestException as e:
         logger.error("Gamma API request failed: %s", e)
@@ -68,8 +69,10 @@ def fetch_markets(offset: int = 0, limit: int = 50) -> list[dict[str, Any]]:
 
 
 def fetch_orderbook(token_id: str) -> dict[str, Any] | None:
-    """Fetch orderbook snapshot for a market's outcome token from CLOB."""
-    url = f"{config.CLOB_API_BASE}/orderbook"
+    """Fetch orderbook snapshot for a market's outcome token from CLOB.
+    Uses /book endpoint which returns dicts: [{'price': '0.01', 'size': '100'}, ...]
+    """
+    url = f"{config.CLOB_API_BASE}/book"
     params = {"token_id": token_id}
     try:
         resp = _session().get(url, params=params, timeout=10)
@@ -81,18 +84,26 @@ def fetch_orderbook(token_id: str) -> dict[str, Any] | None:
 
 
 def compute_liquidity(orderbook: dict[str, Any] | None) -> float:
-    """Sum best-bid and best-ask liquidity in USDC from top 5 levels."""
+    """Sum best-bid and best-ask liquidity in USDC from top 5 levels.
+    Handles both array format [[price, size], ...] and dict format [{'price': ..., 'size': ...}, ...]
+    """
     if not orderbook:
         return 0.0
     total = 0.0
     for side in ("bids", "asks"):
         orders = orderbook.get(side, [])
         if orders:
-            try:
-                # Each order: [price, size] — size is in tokens (× price = USDC)
-                total += sum(float(o[1]) * float(o[0]) for o in orders[:5])
-            except (IndexError, ValueError, TypeError):
-                continue
+            for o in orders[:5]:
+                try:
+                    if isinstance(o, dict):
+                        price = float(o.get("price", 0))
+                        size = float(o.get("size", 0))
+                    else:
+                        price = float(o[0])
+                        size = float(o[1])
+                    total += price * size
+                except (IndexError, ValueError, TypeError):
+                    continue
     return total
 
 
@@ -149,7 +160,7 @@ def get_outcome_prices(market: dict[str, Any]) -> tuple[float, float]:
         bid = float(market.get("bestBid", 0))
         ask = float(market.get("bestAsk", 1))
         mid = (bid + ask) / 2.0
-        return (mid, 1.0 - mid)
+        return (round(mid, 4), round(1.0 - mid, 4))
     except (ValueError, TypeError):
         return (0.0, 0.0)
 
@@ -157,8 +168,16 @@ def get_outcome_prices(market: dict[str, Any]) -> tuple[float, float]:
 def get_token_ids(market: dict[str, Any]) -> tuple[str, str]:
     """
     Return (yes_token_id, no_token_id) from clobTokenIds.
+    The field can be a list or a JSON-encoded string.
     """
-    ids = market.get("clobTokenIds", [])
+    raw = market.get("clobTokenIds", [])
+    ids = raw
+    if isinstance(raw, str):
+        import json
+        try:
+            ids = json.loads(raw)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return ("", "")
     if isinstance(ids, list) and len(ids) >= 2:
         return (str(ids[0]), str(ids[1]))
     return ("", "")
@@ -250,7 +269,15 @@ def scan() -> list[dict]:
         if not title or title == "?":
             continue
 
+        # Skip UST (Ultra Short Term) markets — they have no CLOB orderbooks
+        yes_token, no_token = get_token_ids(m)
+        if not yes_token or not no_token:
+            continue
+
         yes_p, no_p = get_outcome_prices(m)
+        if yes_p == 0.0 and no_p == 0.0:
+            continue  # no price data available
+
         is_hp, direction = is_high_probability(yes_p, no_p)
         if not is_hp:
             continue
