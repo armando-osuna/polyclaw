@@ -8,6 +8,41 @@ checks each opportunity before betting.
 buying near-certainties), competition is low, and mispricing persists because no
 one is watching.
 
+```mermaid
+graph TB
+    subgraph "Every 15 Minutes"
+        A[Gamma API<br/>200 markets] --> B{88-96% price?}
+        B -->|Yes| C{Stale ≥6h?}
+        B -->|No| A
+        C -->|Yes| D{Liquidity ≥$500?}
+        C -->|No| A
+        D -->|Yes| E[Candidate Pool]
+        D -->|No| A
+    end
+    
+    subgraph "AI Validation"
+        E --> F[Web Search Scan<br/>Claude + web_search_20250305]
+        F -->|Disqualifying news?| G[SKIP]
+        F -->|No news| H[Claude Sentiment Score<br/>confidence / direction / risk_flags]
+        H -->|Score < 75| G
+        H -->|Score ≥ 75| I[APPROVED]
+    end
+    
+    subgraph "Execution"
+        I --> J[Risk Checks<br/>Max 5 positions · 2% per trade · $0.80 hard exit]
+        J --> K[DRY_RUN?]
+        K -->|Yes| L[Log order only<br/>🔒 No real money]
+        K -->|No| M[Place limit order<br/>py_clob_client · EIP-712]
+        M --> N[Monitor fills<br/>WebSocket]
+    end
+    
+    style A fill:#0d1117,stroke:#58a6ff
+    style E fill:#0d1117,stroke:#3fb950
+    style I fill:#0d1117,stroke:#3fb950
+    style L fill:#0d1117,stroke:#f0883e
+    style M fill:#0d1117,stroke:#f85149
+```
+
 ## Architecture
 
 ```
